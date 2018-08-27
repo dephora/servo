@@ -47,7 +47,7 @@ extern crate gleam;
 extern crate half;
 #[macro_use]
 extern crate html5ever;
-#[macro_use]
+extern crate http;
 extern crate hyper;
 extern crate hyper_serde;
 extern crate image;
@@ -64,7 +64,6 @@ extern crate malloc_size_of;
 #[macro_use]
 extern crate malloc_size_of_derive;
 extern crate metrics;
-#[macro_use]
 extern crate mime;
 extern crate mime_guess;
 extern crate mitochondria;
@@ -107,6 +106,8 @@ extern crate swapper;
 extern crate time;
 #[cfg(target_os = "linux")]
 extern crate tinyfiledialogs;
+#[macro_use]
+extern crate typed_headers;
 extern crate unicode_segmentation;
 extern crate url;
 extern crate utf8;
