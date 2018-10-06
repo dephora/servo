@@ -2013,6 +2013,7 @@ impl FragmentDisplayListBuilding for Fragment {
                             tile_spacing: LayoutSize::zero(),
                             image_rendering: ImageRendering::Auto,
                             alpha_type: webrender_api::AlphaType::PremultipliedAlpha,
+                            color: webrender_api::ColorF::WHITE,
                         },
                     );
                 }

@@ -4,17 +4,17 @@
 
 #![cfg(test)]
 
-extern crate chrono;
 extern crate cookie as cookie_rs;
 extern crate devtools_traits;
 extern crate embedder_traits;
 extern crate flate2;
 extern crate futures;
+extern crate headers_core;
+extern crate headers_ext;
 extern crate http;
 extern crate hyper;
 extern crate hyper_serde;
 extern crate ipc_channel;
-extern crate language_tags;
 #[macro_use]
 extern crate lazy_static;
 extern crate mime;
@@ -29,7 +29,6 @@ extern crate servo_url;
 extern crate time;
 extern crate tokio;
 extern crate tokio_openssl;
-extern crate typed_headers;
 extern crate url;
 
 mod cookie;

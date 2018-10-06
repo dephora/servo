@@ -11,13 +11,15 @@ use fetch_with_context;
 use flate2::Compression;
 use flate2::write::{DeflateEncoder, GzEncoder};
 use futures::{self, Future, Stream};
+use headers_core::HeaderMapExt;
+use headers_ext::{Authorization, Basic, AccessControlAllowOrigin, ContentLength, Date, Host, Origin};
+use headers_ext::{StrictTransportSecurity, UserAgent};
 use http::{Method, StatusCode};
-use http::header::HeaderMap;
+use http::header::{self, HeaderMap, HeaderValue};
+use http::uri::Authority;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
 use hyper::body::Body;
-use language_tags::LanguageTag;
 use make_server;
-use mime;
 use msg::constellation_msg::TEST_PIPELINE_ID;
 use net::cookie::Cookie;
 use net::cookie_storage::CookieStorage;
@@ -34,10 +36,7 @@ use std::io::Write;
 use std::str;
 use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use typed_headers::{Accept, AcceptEncoding, ContentEncoding, ContentLength, Cookie as CookieHeader, Credentials};
-use typed_headers::{AcceptLanguage, AccessControlAllowOrigin, Authorization, Date};
-use typed_headers::{ContentCoding, HeaderMapExt, Host, Location, Origin, Quality, QualityItem, SetCookie};
-use typed_headers::{StrictTransportSecurity, UserAgent};
+use std::time::Duration;
 
 fn mock_origin() -> ImmutableOrigin {
     ServoUrl::parse("http://servo.org").unwrap().origin()
@@ -100,31 +99,17 @@ fn test_check_default_headers_loaded_in_every_request() {
 
     let mut headers = HeaderMap::new();
 
-    headers.typed_insert(&AcceptEncoding(vec![QualityItem::new(ContentCoding::GZIP, Quality::from_u16(1000)),
-                                              QualityItem::new(ContentCoding::DEFLATE, Quality::from_u16(1000)),
-                                              QualityItem::new(ContentCoding::BROTLI, Quality::from_u16(1000))]));
+    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br"));
 
-    headers.typed_insert(&Host::new(url.host_str().unwrap(), url.port()).unwrap());
+    headers.typed_insert(
+        Host::from(format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()).parse::<Authority>().unwrap()));
 
-    let accept = Accept(vec![
-                            QualityItem::new(mime::TEXT_HTML, Quality::from_u16(1000)),
-                            QualityItem::new("application/xhtml+xml".parse().unwrap(), Quality::from_u16(1000)),
-                            QualityItem::new("application/xml".parse().unwrap(), Quality::from_u16(900)),
-                            QualityItem::new(mime::STAR_STAR, Quality::from_u16(800)),
-                            ]);
-    headers.typed_insert(&accept);
+    headers.insert(header::ACCEPT,
+        HeaderValue::from_static("text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8"));
 
-    let mut en_us: LanguageTag = Default::default();
-    en_us.language = Some("en".to_owned());
-    en_us.region = Some("US".to_owned());
-    let mut en: LanguageTag = Default::default();
-    en.language = Some("en".to_owned());
-    headers.typed_insert(&AcceptLanguage::new(vec![
-        QualityItem::new(en_us, Quality::from_u16(1000)),
-        QualityItem::new(en, Quality::from_u16(500)),
-    ]).unwrap());
+    headers.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("en-US, en; q=0.5"));
 
-    headers.typed_insert(&UserAgent(::DEFAULT_USER_AGENT.to_owned()));
+    headers.typed_insert::<UserAgent>(::DEFAULT_USER_AGENT.parse().unwrap());
 
     *expected_headers.lock().unwrap() = Some(headers.clone());
 
@@ -142,11 +127,11 @@ fn test_check_default_headers_loaded_in_every_request() {
 
     // Testing for method.POST
     let mut post_headers = headers.clone();
-    post_headers.typed_insert(&ContentLength(0 as u64));
+    post_headers.typed_insert(ContentLength(0 as u64));
     let url_str = url.as_str();
     // request gets header "Origin: http://example.com" but expected_headers has
     // "Origin: http://example.com/" which do not match for equality so strip trailing '/'
-    post_headers.typed_insert::<Origin>(&(&url_str[..url_str.len()-1]).parse().unwrap());
+    post_headers.insert(header::ORIGIN, HeaderValue::from_str(&url_str[..url_str.len()-1]).unwrap());
     *expected_headers.lock().unwrap() = Some(post_headers);
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),
@@ -165,7 +150,7 @@ fn test_check_default_headers_loaded_in_every_request() {
 #[test]
 fn test_load_when_request_is_not_get_or_head_and_there_is_no_body_content_length_should_be_set_to_0() {
     let handler = move |request: HyperRequest<Body>, _: &mut HyperResponse<Body>| {
-        assert_eq!(request.headers().typed_get::<ContentLength>().unwrap_or(None), Some(ContentLength(0)));
+        assert_eq!(request.headers().typed_get::<ContentLength>(), Some(ContentLength(0)));
     };
     let (server, url) = make_server(handler);
 
@@ -187,13 +172,13 @@ fn test_load_when_request_is_not_get_or_head_and_there_is_no_body_content_length
 #[test]
 fn test_request_and_response_data_with_network_messages() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&Host::new("foo.bar", None).unwrap());
+        response.headers_mut().typed_insert(Host::from("foo.bar".parse::<Authority>().unwrap()));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
 
     let mut request_headers = HeaderMap::new();
-    request_headers.typed_insert(&Host::new("bar.foo", None).unwrap());
+    request_headers.typed_insert(Host::from("bar.foo".parse::<Authority>().unwrap()));
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),
         method: Method::GET,
@@ -217,33 +202,15 @@ fn test_request_and_response_data_with_network_messages() {
     //Creating default headers for request
     let mut headers = HeaderMap::new();
 
-    headers.typed_insert(&AcceptEncoding(vec![
-                                   QualityItem::new(ContentCoding::GZIP, Quality::from_u16(1000)),
-                                   QualityItem::new(ContentCoding::DEFLATE, Quality::from_u16(1000)),
-                                   QualityItem::new(ContentCoding::BROTLI, Quality::from_u16(1000))
-                                   ]));
+    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br"));
+    headers.typed_insert(
+        Host::from(format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()).parse::<Authority>().unwrap()));
 
-    headers.typed_insert(&Host::new(url.host_str().unwrap(), url.port()).unwrap());
+    headers.insert(header::ACCEPT,
+        HeaderValue::from_static("text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8"));
 
-    let accept = Accept(vec![
-                            QualityItem::new(mime::TEXT_HTML, Quality::from_u16(1000)),
-                            QualityItem::new("application/xhtml+xml".parse().unwrap(), Quality::from_u16(1000)),
-                            QualityItem::new("application/xml".parse().unwrap(), Quality::from_u16(900)),
-                            QualityItem::new(mime::STAR_STAR, Quality::from_u16(800)),
-                            ]);
-    headers.typed_insert(&accept);
-
-    let mut en_us: LanguageTag = Default::default();
-    en_us.language = Some("en".to_owned());
-    en_us.region = Some("US".to_owned());
-    let mut en: LanguageTag = Default::default();
-    en.language = Some("en".to_owned());
-    headers.typed_insert(&AcceptLanguage::new(vec![
-        QualityItem::new(en_us, Quality::from_u16(1000)),
-        QualityItem::new(en, Quality::from_u16(500)),
-    ]).unwrap());
-
-    headers.typed_insert(&UserAgent(::DEFAULT_USER_AGENT.to_owned()));
+    headers.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("en-US, en; q=0.5"));
+    headers.typed_insert::<UserAgent>(::DEFAULT_USER_AGENT.parse().unwrap());
 
     let httprequest = DevtoolsHttpRequest {
         url: url,
@@ -260,11 +227,9 @@ fn test_request_and_response_data_with_network_messages() {
 
     let content = "Yay!";
     let mut response_headers = HeaderMap::new();
-    response_headers.typed_insert(&ContentLength(content.len() as u64));
-    response_headers.typed_insert(&Host::new("foo.bar", None).unwrap());
-    response_headers.typed_insert(
-        &devhttpresponse.headers.as_ref().unwrap().typed_get::<Date>().unwrap().unwrap().clone()
-    );
+    response_headers.typed_insert(ContentLength(content.len() as u64));
+    response_headers.typed_insert(Host::from("foo.bar".parse::<Authority>().unwrap()));
+    response_headers.typed_insert(devhttpresponse.headers.as_ref().unwrap().typed_get::<Date>().unwrap().clone());
 
     let httpresponse = DevtoolsHttpResponse {
         headers: Some(response_headers),
@@ -280,7 +245,7 @@ fn test_request_and_response_data_with_network_messages() {
 #[test]
 fn test_request_and_response_message_from_devtool_without_pipeline_id() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&Host::new("foo.bar", None).unwrap());
+        response.headers_mut().typed_insert(Host::from("foo.bar".parse::<Authority>().unwrap()));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -314,7 +279,7 @@ fn test_redirected_request_to_devtools() {
     let post_redirect_url = post_url.clone();
     let pre_handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         assert_eq!(request.method(), Method::POST);
-        response.headers_mut().typed_insert(&Location(post_redirect_url.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&post_redirect_url.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (pre_server, pre_url) = make_server(pre_handler);
@@ -360,7 +325,7 @@ fn test_load_when_redirecting_from_a_post_should_rewrite_next_request_as_get() {
     let post_redirect_url = post_url.clone();
     let pre_handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         assert_eq!(request.method(), Method::POST);
-        response.headers_mut().typed_insert(&Location(post_redirect_url.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&post_redirect_url.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (pre_server, pre_url) = make_server(pre_handler);
@@ -384,7 +349,7 @@ fn test_load_when_redirecting_from_a_post_should_rewrite_next_request_as_get() {
 #[test]
 fn test_load_should_decode_the_response_as_deflate_when_response_headers_have_content_encoding_deflate() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&ContentEncoding::new(vec![ContentCoding::DEFLATE]).unwrap());
+        response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("deflate"));
         let mut e = DeflateEncoder::new(Vec::new(), Compression::default());
         e.write(b"Yay!").unwrap();
         let encoded_content = e.finish().unwrap();
@@ -414,7 +379,7 @@ fn test_load_should_decode_the_response_as_deflate_when_response_headers_have_co
 #[test]
 fn test_load_should_decode_the_response_as_gzip_when_response_headers_have_content_encoding_gzip() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&ContentEncoding::new(vec![ContentCoding::GZIP]).unwrap());
+        response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
         let mut e = GzEncoder::new(Vec::new(), Compression::default());
         e.write(b"Yay!").unwrap();
         let encoded_content = e.finish().unwrap();
@@ -457,7 +422,7 @@ fn test_load_doesnt_send_request_body_on_any_redirect() {
         read_response(request).and_then(|data| {
             assert_eq!(data, "Body on POST"); futures::future::ok(())
         }).poll().unwrap();
-        response.headers_mut().typed_insert(&Location(post_redirect_url.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&post_redirect_url.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (pre_server, pre_url) = make_server(pre_handler);
@@ -482,7 +447,8 @@ fn test_load_doesnt_send_request_body_on_any_redirect() {
 #[test]
 fn test_load_doesnt_add_host_to_sts_list_when_url_is_http_even_if_sts_headers_are_present() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&StrictTransportSecurity::excluding_subdomains(31536000));
+        response.headers_mut().typed_insert(
+            StrictTransportSecurity::excluding_subdomains(Duration::from_secs(31536000)));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -508,7 +474,7 @@ fn test_load_doesnt_add_host_to_sts_list_when_url_is_http_even_if_sts_headers_ar
 #[test]
 fn test_load_sets_cookies_in_the_resource_manager_when_it_get_set_cookie_header_in_response() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&SetCookie(vec!["mozillaIs=theBest".to_owned()]));
+        response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("mozillaIs=theBest"));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -539,9 +505,7 @@ fn test_load_sets_cookies_in_the_resource_manager_when_it_get_set_cookie_header_
 #[test]
 fn test_load_sets_requests_cookies_header_for_url_by_getting_cookies_from_the_resource_manager() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let mut expected = CookieHeader::new();
-        expected.set("mozillaIs", "theBest");
-        assert_eq!(request.headers().typed_get().unwrap_or(None), Some(expected));
+        assert_eq!(request.headers().get(header::COOKIE).unwrap().as_bytes(), b"mozillaIs=theBest");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -578,9 +542,7 @@ fn test_load_sets_requests_cookies_header_for_url_by_getting_cookies_from_the_re
 #[test]
 fn test_load_sends_cookie_if_nonhttp() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let mut expected = CookieHeader::new();
-        expected.set("mozillaIs", "theBest");
-        assert_eq!(request.headers().typed_get().unwrap_or(None), Some(expected));
+        assert_eq!(request.headers().get(header::COOKIE).unwrap().as_bytes(), b"mozillaIs=theBest");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -617,8 +579,7 @@ fn test_load_sends_cookie_if_nonhttp() {
 #[test]
 fn test_cookie_set_with_httponly_should_not_be_available_using_getcookiesforurl() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let pair = vec!["mozillaIs=theBest; HttpOnly".to_owned()];
-        response.headers_mut().typed_insert(&SetCookie(pair));
+        response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("mozillaIs=theBest; HttpOnly"));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -651,8 +612,7 @@ fn test_cookie_set_with_httponly_should_not_be_available_using_getcookiesforurl(
 #[test]
 fn test_when_cookie_received_marked_secure_is_ignored_for_http() {
     let handler = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let pair = vec!["mozillaIs=theBest; Secure".to_owned()];
-        response.headers_mut().typed_insert(&SetCookie(pair));
+        response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("mozillaIs=theBest; Secure"));
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -685,7 +645,7 @@ fn test_load_sets_content_length_to_length_of_request_body() {
     let content = b"This is a request body";
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         let content_length = ContentLength(content.len() as u64);
-        assert_eq!(request.headers().typed_get::<ContentLength>().unwrap_or(None), Some(content_length));
+        assert_eq!(request.headers().typed_get::<ContentLength>(), Some(content_length));
         *response.body_mut() = content.to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -708,16 +668,14 @@ fn test_load_sets_content_length_to_length_of_request_body() {
 
 #[test]
 fn test_load_uses_explicit_accept_from_headers_in_load_data() {
-    let accept = Accept(vec![QualityItem::new(mime::TEXT_HTML, Quality::from_u16(1000))]);
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let expected_accept = Accept(vec![QualityItem::new(mime::TEXT_HTML, Quality::from_u16(1000))]);
-        assert_eq!(request.headers().typed_get::<Accept>().unwrap_or(None), Some(expected_accept));
+        assert_eq!(request.headers().get(header::ACCEPT).unwrap().to_str().unwrap(), "text/html");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
 
     let mut accept_headers = HeaderMap::new();
-    accept_headers.typed_insert(&accept);
+    accept_headers.insert(header::ACCEPT, HeaderValue::from_static("text/html"));
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),
         method: Method::GET,
@@ -737,12 +695,8 @@ fn test_load_uses_explicit_accept_from_headers_in_load_data() {
 #[test]
 fn test_load_sets_default_accept_to_html_xhtml_xml_and_then_anything_else() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        assert_eq!(request.headers().typed_get::<Accept>().unwrap_or(None), Some(Accept(vec![
-            QualityItem::new(mime::TEXT_HTML, Quality::from_u16(1000)),
-            QualityItem::new("application/xhtml+xml".parse().unwrap(), Quality::from_u16(1000)),
-            QualityItem::new("application/xml".parse().unwrap(), Quality::from_u16(900)),
-            QualityItem::new(mime::STAR_STAR, Quality::from_u16(800)),
-        ])));
+        assert_eq!(request.headers().get(header::ACCEPT).unwrap().to_str().unwrap(),
+        "text/html, application/xhtml+xml, application/xml; q=0.9, */*; q=0.8");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -764,17 +718,14 @@ fn test_load_sets_default_accept_to_html_xhtml_xml_and_then_anything_else() {
 
 #[test]
 fn test_load_uses_explicit_accept_encoding_from_load_data_headers() {
-    let accept_encoding = AcceptEncoding(vec![QualityItem::new(ContentCoding::CHUNKED, Quality::from_u16(1000))]);
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        let expected_accept_encoding = AcceptEncoding(vec![QualityItem::new(ContentCoding::CHUNKED,
-                                                                            Quality::from_u16(1000))]);
-        assert_eq!(request.headers().typed_get::<AcceptEncoding>().unwrap_or(None), Some(expected_accept_encoding));
+        assert_eq!(request.headers().get(header::ACCEPT_ENCODING).unwrap().to_str().unwrap(), "chunked");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
 
     let mut accept_encoding_headers = HeaderMap::new();
-    accept_encoding_headers.typed_insert(&accept_encoding);
+    accept_encoding_headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("chunked"));
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),
         method: Method::GET,
@@ -794,11 +745,7 @@ fn test_load_uses_explicit_accept_encoding_from_load_data_headers() {
 #[test]
 fn test_load_sets_default_accept_encoding_to_gzip_and_deflate() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        assert_eq!(request.headers().typed_get::<AcceptEncoding>().unwrap_or(None), Some(AcceptEncoding(vec![
-            QualityItem::new(ContentCoding::GZIP, Quality::from_u16(1000)),
-            QualityItem::new(ContentCoding::DEFLATE, Quality::from_u16(1000)),
-            QualityItem::new(ContentCoding::BROTLI, Quality::from_u16(1000)),
-        ])));
+        assert_eq!(request.headers().get(header::ACCEPT_ENCODING).unwrap().to_str().unwrap(), "gzip, deflate, br");
         *response.body_mut() = b"Yay!".to_vec().into();
     };
     let (server, url) = make_server(handler);
@@ -823,14 +770,15 @@ fn test_load_errors_when_there_a_redirect_loop() {
     let url_b_for_a = Arc::new(Mutex::new(None::<ServoUrl>));
     let url_b_for_a_clone = url_b_for_a.clone();
     let handler_a = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&Location(url_b_for_a_clone.lock().unwrap().as_ref().unwrap().to_string()));
+        response.headers_mut().insert(header::LOCATION,
+            HeaderValue::from_str(&url_b_for_a_clone.lock().unwrap().as_ref().unwrap().to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (server_a, url_a) = make_server(handler_a);
 
     let url_a_for_b = url_a.clone();
     let handler_b = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&Location(url_a_for_b.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&url_a_for_b.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (server_b, url_b) = make_server(handler_b);
@@ -861,9 +809,8 @@ fn test_load_succeeds_with_a_redirect_loop() {
     let handled_a = AtomicBool::new(false);
     let handler_a = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         if !handled_a.swap(true, Ordering::SeqCst) {
-            response.headers_mut().typed_insert(
-                &Location(url_b_for_a_clone.lock().unwrap().as_ref().unwrap().to_string())
-            );
+            response.headers_mut().insert(header::LOCATION,
+                HeaderValue::from_str(&url_b_for_a_clone.lock().unwrap().as_ref().unwrap().to_string()).unwrap());
             *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
         } else {
             *response.body_mut() = b"Success".to_vec().into()
@@ -873,7 +820,7 @@ fn test_load_succeeds_with_a_redirect_loop() {
 
     let url_a_for_b = url_a.clone();
     let handler_b = move |_: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
-        response.headers_mut().typed_insert(&Location(url_a_for_b.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&url_a_for_b.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (server_b, url_b) = make_server(handler_b);
@@ -910,7 +857,7 @@ fn test_load_follows_a_redirect() {
     let post_redirect_url = post_url.clone();
     let pre_handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         assert_eq!(request.method(), Method::GET);
-        response.headers_mut().typed_insert(&Location(post_redirect_url.to_string()));
+        response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&post_redirect_url.to_string()).unwrap());
         *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
     };
     let (pre_server, pre_url) = make_server(pre_handler);
@@ -941,16 +888,12 @@ fn test_redirect_from_x_to_y_provides_y_cookies_from_y() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         let path = request.uri().path();
         if path == "/com/" {
-            let mut expected = CookieHeader::new();
-            expected.set("mozillaIsNot", "dotOrg");
-            assert_eq!(request.headers().typed_get().unwrap(), Some(expected));
+            assert_eq!(request.headers().get(header::COOKIE).unwrap().as_bytes(), b"mozillaIsNot=dotOrg");
             let location = shared_url_y.lock().unwrap().as_ref().unwrap().to_string();
-            response.headers_mut().typed_insert(&Location(location));
+            response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&location.to_string()).unwrap());
             *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
         } else if path == "/org/" {
-            let mut expected = CookieHeader::new();
-            expected.set("mozillaIs", "theBest");
-            assert_eq!(request.headers().typed_get().unwrap(), Some(expected));
+            assert_eq!(request.headers().get(header::COOKIE).unwrap().as_bytes(), b"mozillaIs=theBest");
             *response.body_mut() = b"Yay!".to_vec().into();
         } else {
             panic!("unexpected path {:?}", path)
@@ -1014,14 +957,12 @@ fn test_redirect_from_x_to_x_provides_x_with_cookie_from_first_response() {
     let handler = move |request: HyperRequest<Body>, response: &mut HyperResponse<Body>| {
         let path = request.uri().path();
         if path == "/initial/" {
-            response.headers_mut().typed_insert(&SetCookie(vec!["mozillaIs=theBest; path=/;".to_owned()]));
+            response.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_static("mozillaIs=theBest; path=/;"));
             let location = "/subsequent/".to_string();
-            response.headers_mut().typed_insert(&Location(location));
+            response.headers_mut().insert(header::LOCATION, HeaderValue::from_str(&location.to_string()).unwrap());
             *response.status_mut() = StatusCode::MOVED_PERMANENTLY;
         } else if path == "/subsequent/" {
-            let mut expected = CookieHeader::new();
-            expected.set("mozillaIs", "theBest");
-            assert_eq!(request.headers().typed_get().unwrap(), Some(expected));
+            assert_eq!(request.headers().get(header::COOKIE).unwrap().as_bytes(), b"mozillaIs=theBest");
             *response.body_mut() = b"Yay!".to_vec().into();
         } else {
             panic!("unexpected path {:?}", path)
@@ -1053,9 +994,8 @@ fn test_redirect_from_x_to_x_provides_x_with_cookie_from_first_response() {
 #[test]
 fn test_if_auth_creds_not_in_url_but_in_cache_it_sets_it() {
     let handler = move |request: HyperRequest<Body>, _response: &mut HyperResponse<Body>| {
-        let basic = Credentials::basic("username", "test").unwrap();
-        let expected = Authorization(basic);
-        assert_eq!(request.headers().typed_get().unwrap(), Some(expected));
+        let expected = Authorization::basic("username", "test");
+        assert_eq!(request.headers().typed_get::<Authorization<Basic>>(), Some(expected));
     };
     let (server, url) = make_server(handler);
 
@@ -1116,15 +1056,19 @@ fn test_origin_set() {
     let origin_header_clone = origin_header.clone();
     let handler = move |request: HyperRequest<Body>, resp: &mut HyperResponse<Body>| {
         let origin_header_clone = origin_header.clone();
-        resp.headers_mut().typed_insert(&AccessControlAllowOrigin::Any);
-        match request.headers().typed_get::<Origin>().unwrap_or(None) {
+        resp.headers_mut().typed_insert(AccessControlAllowOrigin::ANY);
+        match request.headers().typed_get::<Origin>() {
             None => assert_eq!(origin_header_clone.lock().unwrap().take(), None),
             Some(h) => assert_eq!(h, origin_header_clone.lock().unwrap().take().unwrap()),
         }
     };
     let (server, url) = make_server(handler);
 
-    let mut origin = Origin::new(url.scheme().to_owned(), url.host_str().unwrap().to_owned(), url.port()).unwrap();
+    let mut origin = Origin::try_from_parts(
+        url.scheme(),
+        url.host_str().unwrap(),
+        url.port()
+    ).unwrap();
     *origin_header_clone.lock().unwrap() = Some(origin.clone());
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),
@@ -1138,7 +1082,11 @@ fn test_origin_set() {
 
     let origin_url = ServoUrl::parse("http://example.com").unwrap();
     // XXX: Not sure about the Some(80) here. origin_url.origin() returns 80 for the port but origin_url returns None.
-    origin = Origin::new(origin_url.scheme().to_owned(), origin_url.host_str().unwrap().to_owned(), Some(80)).unwrap();
+    origin = Origin::try_from_parts(
+        origin_url.scheme(),
+        origin_url.host_str().unwrap(),
+        Some(80)
+    ).unwrap();
     // Test Origin header is set on Get request with CORS mode
     let mut request = Request::from_init(RequestInit {
         url: url.clone(),

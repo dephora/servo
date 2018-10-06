@@ -32,15 +32,15 @@ use dom::promise::Promise;
 use dom::virtualmethods::VirtualMethods;
 use dom_struct::dom_struct;
 use fetch::FetchCanceller;
+use headers_core::HeaderMapExt;
+use headers_ext::ContentLength;
 use html5ever::{LocalName, Prefix};
-use hyper::header::ContentLength;
 use ipc_channel::ipc;
 use ipc_channel::router::ROUTER;
 use microtask::{Microtask, MicrotaskRunnable};
 use mime::{self, Mime};
 use net_traits::{CoreResourceMsg, FetchChannels, FetchResponseListener, FetchMetadata, Metadata};
 use net_traits::NetworkError;
-use net_traits::{FetchResponseListener, FetchMetadata, Metadata, NetworkError};
 use net_traits::request::{CredentialsMode, Destination, RequestInit};
 use network_listener::{NetworkListener, PreInvoke};
 use script_layout_interface::HTMLMediaData;
@@ -1252,8 +1252,8 @@ impl FetchResponseListener for HTMLMediaElementContext {
 
         if let Some(metadata) = self.metadata.as_ref() {
             if let Some(headers) = metadata.headers.as_ref() {
-                if let Some(content_length) = headers.get::<ContentLength>() {
-                    if let Err(e) = self.elem.root().player.set_input_size(**content_length) {
+                if let Some(content_length) = headers.typed_get::<ContentLength>() {
+                    if let Err(e) = self.elem.root().player.set_input_size(content_length.0) {
                         eprintln!("Could not set player input size {:?}", e);
                     }
                 }
